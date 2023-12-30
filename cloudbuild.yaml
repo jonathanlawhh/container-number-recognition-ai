@@ -28,3 +28,5 @@ steps:
       - --max-instances=2
       - --set-env-vars=VISION_ENDPOINT=$$CNR-VISION_ENDPOINT
       - --set-env-vars=CNR-VISION_KEY=$$CNR-CNR-VISION_KEY
+options:
+  logging: CLOUD_LOGGING_ONLY
