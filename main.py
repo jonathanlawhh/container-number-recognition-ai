@@ -205,17 +205,31 @@ def http_request(request):
         <https://flask.palletsprojects.com/en/1.1.x/api/#flask.make_response>.
     """
 
+    # Set CORS headers for the preflight request
+    if request.method == "OPTIONS":
+        # Allows GET requests from any origin with the Content-Type
+        # header and caches preflight response for an 3600s
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Max-Age": "3600",
+        }
+
+        return "", 204, headers
+    headers = {"Access-Control-Allow-Origin": "*"}
+
     if 'image' not in request.files or request.files["image"].filename == '':
-        return jsonify({"message": "No files found"}), 400
+        return jsonify({"message": "No files found"}), 400, headers
 
     file = request.files['image']
     if file and file.filename.rsplit('.', 1)[1].lower() not in ["jpg", "jpeg", "bmp", "png"]:
-        return jsonify({"message": "Wrong file type"}), 415
+        return jsonify({"message": "Wrong file type"}), 415, headers
 
     im = cv2.imdecode(np.fromstring(file.read(), np.uint8), cv2.IMREAD_COLOR)
     encoded_im = cv2.imencode('.JPG', im)[1].tobytes()
 
-    return jsonify(detect_container_details(encoded_im)), 200
+    return jsonify(detect_container_details(encoded_im)), 200, headers
 
 
 if __name__ == '__main__':
