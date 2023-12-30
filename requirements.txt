@@ -2,3 +2,4 @@ python-dotenv
 azure-ai-vision
 opencv-python
 numpy
+flask

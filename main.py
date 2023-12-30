@@ -193,6 +193,31 @@ def detect_container_details(input_image_byte: bytes) -> json:
             "error": None}
 
 
+def http_request(request):
+    from flask import jsonify
+    """HTTP Cloud Function.
+    Args:
+        request (flask.Request): The request object.
+        <https://flask.palletsprojects.com/en/1.1.x/api/#incoming-request-data>
+    Returns:
+        The response text, or any set of values that can be turned into a
+        Response object using `make_response`
+        <https://flask.palletsprojects.com/en/1.1.x/api/#flask.make_response>.
+    """
+
+    if 'image' not in request.files or request.files["image"].filename == '':
+        return jsonify({"message": "No files found"}), 400
+
+    file = request.files['image']
+    if file and file.filename.rsplit('.', 1)[1].lower() not in ["jpg", "jpeg", "bmp", "png"]:
+        return jsonify({"message": "Wrong file type"}), 415
+
+    im = cv2.imdecode(np.fromstring(file.read(), np.uint8), cv2.IMREAD_COLOR)
+    encoded_im = cv2.imencode('.JPG', im)[1].tobytes()
+
+    return jsonify(detect_container_details(encoded_im)), 200
+
+
 if __name__ == '__main__':
     image_dir = "./data"
 
