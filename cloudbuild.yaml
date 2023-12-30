@@ -1,22 +1,6 @@
 steps:
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
-      - secrets
-      - versions
-      - access
-      - latest
-      - --secret=CNR-VISION_ENDPOINT
-    id: 'CNR-VISION_ENDPOINT'
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args:
-      - secrets
-      - versions
-      - access
-      - latest
-      - --secret=CNR-VISION_ENDPOINT
-    id: 'CNR-CNR-VISION_KEY'
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args:
       - functions
       - deploy
       - container_number_recognition_ai  # Replace with your function name
@@ -26,7 +10,7 @@ steps:
       - --entry-point=http_request  # Replace with your entry point function
       - --region=us-central1  # Replace with your desired region
       - --max-instances=2
-      - --set-env-vars=VISION_ENDPOINT=$$CNR-VISION_ENDPOINT
-      - --set-env-vars=CNR-VISION_KEY=$$CNR-CNR-VISION_KEY
+      - --set-secrets=[VISION_ENDPOINT=CNR-VISION_ENDPOINT:latest,VISION_KEY=CNR-CNR-VISION_KEY:latest]
+
 options:
   logging: CLOUD_LOGGING_ONLY
