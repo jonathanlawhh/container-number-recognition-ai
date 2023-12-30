@@ -4,13 +4,12 @@ steps:
       - functions
       - deploy
       - container_number_recognition_ai  # Replace with your function name
-      - --runtime=python312
+      - --runtime=python39
       - --trigger-http
       - --allow-unauthenticated
       - --entry-point=http_request  # Replace with your entry point function
       - --region=us-central1  # Replace with your desired region
       - --max-instances=2
       - --set-secrets=VISION_ENDPOINT=CNR-VISION_ENDPOINT:latest,VISION_KEY=CNR-VISION_KEY:latest
-
 options:
   logging: CLOUD_LOGGING_ONLY
