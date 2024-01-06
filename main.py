@@ -1,3 +1,4 @@
+import datetime
 import os
 from typing import Tuple
 import azure.ai.vision as sdk
@@ -5,6 +6,7 @@ import numpy as np
 from dotenv import load_dotenv
 import cv2
 import json
+import re
 
 load_dotenv()
 assert os.environ["VISION_ENDPOINT"] != "", "Please ensure VISION ENDPOINT is setup in .env file."
@@ -12,6 +14,15 @@ assert os.environ["VISION_KEY"] != "", "Please ensure VISION KEY is setup in .en
 
 service_options = sdk.VisionServiceOptions(os.environ["VISION_ENDPOINT"],
                                            os.environ["VISION_KEY"])
+
+
+class CNRAI:
+    def __init__(self):
+        self.container_number: str = ""
+        self.container_type: str = ""
+        self.bounding_box: list = [0, 0, 0, 0]
+        self.container_color: list = [0, 0, 0]
+        self.error: str | None = None
 
 
 def downscale(ori_img: np.ndarray) -> np.ndarray:
@@ -63,7 +74,7 @@ def within_buffer(co1_check_buff: int, co2: int, buffer: int = 50) -> bool:
     return co1_check_buff - buffer < co2 < co1_check_buff + buffer
 
 
-def get_container_prefixes() -> Tuple:
+def get_carrier_prefixes() -> Tuple:
     """
     Read the pre-defined container prefix and return in a Tuple
     :return: ("APHU", "EGHU"...)
@@ -74,14 +85,165 @@ def get_container_prefixes() -> Tuple:
     return cp if cp else tuple([])
 
 
-def get_ctnr_color(ctnr_img: np.ndarray) -> np.ndarray:
+def get_ctnr_color(ctnr_img: np.ndarray) -> list:
     """
     Get the most dominant color from the image given
     :param ctnr_img: Input image
     :return: [B, G, R]
     """
     colors, count = np.unique(ctnr_img.reshape(-1, ctnr_img.shape[-1]), axis=0, return_counts=True)
-    return colors[count.argmax()]
+    colors_max: np.ndarray = colors[count.argmax()]
+    return colors_max.tolist()
+
+
+def get_ctnr_color_from_byte(input_byte_img: bytes, crop_zone: list[int]) -> list:
+    """
+    Convert byte image to a ndarray format and pass to get container color
+    :param input_byte_img:
+    :param crop_zone: bounding box to extract color from
+    :return: [B, G, R]
+    """
+    nparr = np.frombuffer(input_byte_img, np.uint8)
+    img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    cropped_img: np.ndarray = img_np[
+                              max(0, crop_zone[1] - 100): min(crop_zone[3] + 100,
+                                                              img_np.shape[1]),
+                              max(0, crop_zone[0] - 100): min(crop_zone[2] + 100,
+                                                              img_np.shape[0])]
+
+    byte_res: list = get_ctnr_color(cropped_img)
+    return byte_res
+
+
+def extract_ctnr_location(ocr_output: sdk.DetectedText) -> CNRAI:
+    """
+    Extract container information using bounding box location logic
+    :param ocr_output: Output from Vision API
+    :return: CNRAI
+    """
+    # Define standard prefix, Tuple because it may run faster
+    # carrier_prefix: list[str] = ["EGSU", "EMCU", "GAOU", "GLDU", "MRKU", "MRSU", "MSDU", "SEGU", "TGHU", "WEDU"]
+    carrier_prefix: Tuple = get_carrier_prefixes()
+    container_t_prefix: Tuple = ("G1", "R1", "U1", "P1", "T1")
+
+    # The bounding block of detected container number
+    # [x, y, x3, y3]
+    bound_block = [0, 0, 0, 0]
+
+    tmp_cnrai = CNRAI()
+
+    orientation_horizontal: bool = True
+    last_xy1_cood: list[int, int] = []
+    allowable_buffer: int = 50
+
+    for detected_text_line in ocr_output.lines:
+        for word in detected_text_line.words:
+            # As per shipping guidelines, container numbers will have 11 characters
+            # https://www.evergreen-line.com/container/jsp/CNTR_ContainerMarkings.jsp
+            if len(tmp_cnrai.container_number) >= 11 and tmp_cnrai.container_type != "":
+                # Early exit if container number and container type is detected
+                break
+
+            clean_text: str = str(word.content).strip().replace(" ", "").upper()
+
+            x1, y1, x2, y2, x3, y3, x4, y4 = word.bounding_polygon
+
+            # Detect container prefix
+            if tmp_cnrai.container_number == "" and any(prefix in clean_text for prefix in carrier_prefix):
+                tmp_cnrai.container_number = clean_text
+                orientation_horizontal = check_orientation_horizontal(word.bounding_polygon)
+                last_xy1_cood = word.bounding_polygon[:2]
+
+                bound_block[0] = x1
+                bound_block[1] = y1
+                bound_block[2] = x3
+                bound_block[3] = y3
+
+            # Detect container serial
+            # Ensure the container prefix is populated first,
+            # and the total character is >= 11 as per ISO standard
+            if 11 > len(tmp_cnrai.container_number) >= 4:
+                crit_met: bool = False
+
+                # If horizontal container number
+                if orientation_horizontal:
+                    crit_met = x1 > last_xy1_cood[0] and within_buffer(last_xy1_cood[1], y1, allowable_buffer)
+
+                # If vertical container number
+                if not orientation_horizontal:
+                    crit_met = y1 > last_xy1_cood[1] and within_buffer(last_xy1_cood[0], x1, allowable_buffer)
+
+                if crit_met:
+                    tmp_cnrai.container_number += clean_text
+                    last_xy1_cood = word.bounding_polygon[:2]
+
+                    bound_block[2] = x3 if x3 > bound_block[2] else bound_block[2]
+                    bound_block[3] = y3 if y3 > bound_block[3] else bound_block[3]
+
+            # Detect container type
+            if tmp_cnrai.container_type == "":
+                if any(t in clean_text for t in container_t_prefix):
+                    tmp_cnrai.container_type = clean_text
+
+            allowable_buffer = get_label_angle(word.bounding_polygon) * 3
+
+    tmp_cnrai.bounding_box = [int(bb) for bb in bound_block]
+    return tmp_cnrai
+
+
+def extract_ctnr_regex(ocr_output: sdk.DetectedText) -> CNRAI:
+    """
+    Using regex to determine the container number, the simplest method
+    :param ocr_output: Output from Vision API
+    :return: CNRAI
+    """
+
+    tmp_cnrai = CNRAI()
+
+    # Extract container number based on carrier prefix + 7 digits behind
+    carrier_prefix: Tuple = get_carrier_prefixes()
+    detected_combined_text: str = "".join(
+        [str(word.content).strip().replace(" ", "").upper() for detected_text_line in ocr_output.lines for word in
+         detected_text_line.words])
+
+    regex_ctnr_pattern: str = "".join(["(", "|".join(carrier_prefix), ")", "(\d{7})"])
+    match_text: list = re.findall(regex_ctnr_pattern, detected_combined_text)
+
+    # If successful, extract the bounding box
+    if len(match_text) > 0 and len(match_text[0]) > 1:
+        tmp_cnrai.container_number = "".join(match_text[0])
+        dispose_ctnr: str = tmp_cnrai.container_number
+        #     Get bounding box
+        bb: list = [0, 0, 0, 0]
+        for detected_text_line in ocr_output.lines:
+            for word in detected_text_line.words:
+                if word.content in tmp_cnrai.container_number:
+                    x1, y1, x2, y2, x3, y3, x4, y4 = word.bounding_polygon
+                    if bb[0] == 0:
+                        bb[0] = x1
+                        bb[1] = y1
+                        dispose_ctnr = dispose_ctnr.replace(word.content, "")
+                        continue
+                    if bb[0] > 0:
+                        bb[2] = x3
+                        bb[3] = y3
+                        dispose_ctnr = dispose_ctnr.replace(word.content, "")
+
+            if len(dispose_ctnr) < 1:
+                break
+
+        tmp_cnrai.bounding_box = [int(intbb) for intbb in bb]
+
+    # Then, extract the container type. 2 digits then container_t_prefix
+    container_t_prefix: Tuple = ("G1", "R1", "U1", "P1", "T1")
+    regex_ctnr_type_pattern: str = "".join(["(\d{2})", "(", "|".join(container_t_prefix), ")"])
+    match_ctnr_type_text: list = re.findall(regex_ctnr_type_pattern, detected_combined_text)
+
+    if len(match_ctnr_type_text) > 0 and len(match_ctnr_type_text[0]) > 1:
+        tmp_cnrai.container_type = "".join(match_ctnr_type_text[0])
+
+    return tmp_cnrai
 
 
 def detect_container_details(input_image_byte: bytes) -> json:
@@ -109,88 +271,25 @@ def detect_container_details(input_image_byte: bytes) -> json:
     # Analyze and get results
     result: sdk.ImageAnalysisResult = image_analyzer.analyze()
 
-    # Define standard prefix, Tuple because it may run faster
-    # carrier_prefix: list[str] = ["EGSU", "EMCU", "GAOU", "GLDU", "MRKU", "MRSU", "MSDU", "SEGU", "TGHU", "WEDU"]
-    carrier_prefix: Tuple = get_container_prefixes()
-    container_t_prefix: Tuple = ("G1", "R1", "U1", "P1", "T1")
-
-    # The bounding block of detected container number
-    # [x, y, x3, y3]
-    bound_block = [0, 0, 0, 0]
-
-    detected_container: str = ""
-    detected_container_type: str = ""
-
-    orientation_horizontal: bool = True
-    last_xy1_cood: list[int, int] = []
-    allowable_buffer: int = 50
-
-    # Early exist if error, reduce nesting
+    # Early exist if error
+    cnrai_detection: CNRAI = CNRAI()
     if result.reason != sdk.ImageAnalysisResultReason.ANALYZED:
         error_details = sdk.ImageAnalysisErrorDetails.from_result(result)
-        return {"container_number": None, "container_type": None, "bounding_box": None, "error": error_details.message}
+        cnrai_detection.error = error_details.message
+        return cnrai_detection.__dict__
 
     if result.text is None:
-        return {"container_number": None, "container_type": None, "bounding_box": None, "error": None}
+        return cnrai_detection.__dict__
 
-    # Sort results by position
-    # sorted_words = sorted(result.text.lines,
-    #                       key=lambda item: ( round(item.bounding_polygon[1] / 100) * 100, round(item.bounding_polygon[0] / 100) * 100))
+    cnrai_detection = extract_ctnr_regex(result.text)
 
-    for detected_text_line in result.text.lines:
-        for word in detected_text_line.words:
-            # As per shipping guidelines, container numbers will have 11 characters
-            # https://www.evergreen-line.com/container/jsp/CNTR_ContainerMarkings.jsp
-            if len(detected_container) >= 11 and detected_container_type != "":
-                # Early exit if container number and container type is detected
-                break
+    # If regex logic does not return any data, detect by bounding box location
+    if cnrai_detection.container_number == "" or cnrai_detection.container_type == "":
+        cnrai_detection = extract_ctnr_location(result.text)
 
-            clean_text: str = str(word.content).strip().replace(" ", "").upper()
+    cnrai_detection.container_color = get_ctnr_color_from_byte(input_image_byte, cnrai_detection.bounding_box)
 
-            x1, y1, x2, y2, x3, y3, x4, y4 = word.bounding_polygon
-
-            # Detect container prefix
-            if detected_container == "" and any(prefix in clean_text for prefix in carrier_prefix):
-                detected_container = clean_text
-                orientation_horizontal = check_orientation_horizontal(word.bounding_polygon)
-                last_xy1_cood = word.bounding_polygon[:2]
-
-                bound_block[0] = x1
-                bound_block[1] = y1
-                bound_block[2] = x3
-                bound_block[3] = y3
-
-            # Detect container serial
-            # Ensure the container prefix is populated first,
-            # and the total character is >= 11 as per ISO standard
-            if 11 > len(detected_container) >= 4:
-                crit_met: bool = False
-
-                # If horizontal container number
-                if orientation_horizontal:
-                    crit_met = x1 > last_xy1_cood[0] and within_buffer(last_xy1_cood[1], y1, allowable_buffer)
-
-                # If vertical container number
-                if not orientation_horizontal:
-                    crit_met = y1 > last_xy1_cood[1] and within_buffer(last_xy1_cood[0], x1, allowable_buffer)
-
-                if crit_met:
-                    detected_container += clean_text
-                    last_xy1_cood = word.bounding_polygon[:2]
-
-                    bound_block[2] = x3 if x3 > bound_block[2] else bound_block[2]
-                    bound_block[3] = y3 if y3 > bound_block[3] else bound_block[3]
-
-            # Detect container type
-            if detected_container_type == "":
-                if any(t in clean_text for t in container_t_prefix):
-                    detected_container_type = clean_text
-
-            allowable_buffer = get_label_angle(word.bounding_polygon) * 3
-
-    return {"container_number": detected_container, "container_type": detected_container_type,
-            "bounding_box": [int(bb) for bb in bound_block],
-            "error": None}
+    return cnrai_detection.__dict__
 
 
 def http_request(request):
@@ -247,14 +346,11 @@ if __name__ == '__main__':
             assert res["error"] is None, res["error"]
 
             # Crop the detected bounding area from original image
-            cropped_img: np.ndarray = input_img[max(0, res["bounding_box"][1] - 100): min(res["bounding_box"][3] + 100,
-                                                                                          input_img.shape[1]),
+            cropped_img: np.ndarray = input_img[
+                                      max(0, res["bounding_box"][1] - 100): min(res["bounding_box"][3] + 100,
+                                                                                input_img.shape[1]),
                                       max(0, res["bounding_box"][0] - 100): min(res["bounding_box"][2] + 100,
                                                                                 input_img.shape[0])]
-
-            ctnr_color: np.ndarray = get_ctnr_color(cropped_img)
-            res["container_color"] = ctnr_color.tolist()
-            print(res)
 
             # Put the detected details top left of the cropped image
             text = f"{res['container_number']} - {res['container_type']}"
@@ -262,6 +358,8 @@ if __name__ == '__main__':
                         color=(0, 255, 100), fontScale=1, thickness=2, lineType=cv2.LINE_AA)
 
             # Display
-            # cropped_img = downscale(cropped_img)
+            print(res)
+
+            cropped_img = downscale(cropped_img)
             cv2.imshow("output", cropped_img)
             cv2.waitKey()
